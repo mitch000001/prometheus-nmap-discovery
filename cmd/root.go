@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	nmap "github.com/Ullaakut/nmap/v3"
@@ -24,19 +23,10 @@ var (
 )
 
 func init() {
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-
-	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.prom-http-sd.yaml)")
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	rootCmd.PersistentFlags().String("http.bind-address", defaultHTTPBindAddress, "defines the address to bind on")
 	rootCmd.PersistentFlags().String("http.port", defaultHTTPBindPort, "defines the port to bind on")
 	rootCmd.PersistentFlags().StringArray("scan.targets", []string{}, "defines the scan targets to monitor")
-	rootCmd.PersistentFlags().String("scan.port", "9100", "defines the port to scan for")
+	rootCmd.PersistentFlags().StringArray("scan.ignored-ips", []string{}, "set host ips to ignore")
 }
 
 // rootCmd represents the base command when called without any subcommands
@@ -63,14 +53,18 @@ In addition the hostname gets exported as labels.`,
 		if len(scanTargets) == 0 {
 			log.Fatalln("No scan targets provided")
 		}
-		scanPort, err := cmd.Flags().GetString("scan.port")
+		ignoredIPs, err := cmd.Flags().GetStringArray("scan.ignored-ips")
 		if err != nil {
-			log.Fatalf("Error getting scan port from flag: %v", err)
+			log.Printf("Error getting ignored ips for the scan from flag: %v", err)
+		}
+		ignoredIPsMap := make(map[string]struct{})
+		for _, ip := range ignoredIPs {
+			ignoredIPsMap[ip] = struct{}{}
 		}
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			results, err := nmapScan(r.Context(), scanPort, scanTargets...)
-			w.WriteHeader(http.StatusOK)
+			results, err := nmapScan(r.Context(), ignoredIPsMap, scanTargets...)
 			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
 			if err != nil {
 				log.Printf("Error scanning for machines: %v", err)
 				fmt.Fprintln(w, "[]")
@@ -83,7 +77,7 @@ In addition the hostname gets exported as labels.`,
 			}
 		})
 		log.Printf("Starting http service discovery at %s", listenAddr)
-		log.Printf("Scanning port %s on targets: %v", scanPort, scanTargets)
+		log.Printf("Scanning targets: %v (ignoring %v)", scanTargets, ignoredIPs)
 		log.Fatal(http.ListenAndServe(listenAddr, nil))
 	},
 }
@@ -103,25 +97,37 @@ type ScrapeConfig struct {
 	Labels  map[string]string `json:"labels"`
 }
 
-func nmapScan(ctx context.Context, scanPort string, scanTargets ...string) ([]ScrapeConfig, error) {
+func nmapScan(ctx context.Context, ignoredIPs map[string]struct{}, scanTargets ...string) ([]ScrapeConfig, error) {
 	log.Printf("Starting scan for targets %s", scanTargets)
 	start := time.Now()
+	var ignored int
 	s, err := nmap.NewScanner(
 		ctx,
 		nmap.WithTargets(scanTargets...),
-		nmap.WithOpenOnly(),
 		nmap.WithTimingTemplate(nmap.TimingFastest),
-		nmap.WithPorts(scanPort),
+		nmap.WithFilterHost(func(h nmap.Host) bool {
+			for _, addr := range h.Addresses {
+				if _, ok := ignoredIPs[addr.Addr]; ok {
+					ignored++
+					return false
+				}
+			}
+			return true
+		}),
+		nmap.WithOpenOnly(),
+		nmap.WithFilterPort(func(p nmap.Port) bool {
+			return p.Protocol == "tcp"
+		}),
 	)
 	if err != nil {
-		log.Fatalf("unable to create nmap scanner: %v", err)
+		return nil, fmt.Errorf("unable to create nmap scanner: %w", err)
 	}
-
 	// Executes asynchronously, allowing results to be streamed in real time.
 	done := make(chan error)
 	result, warnings, err := s.Async(done).Run()
 	if err != nil {
-		log.Fatal(err)
+		log.Println(warnings)
+		return nil, fmt.Errorf("error performning scan: %w", err)
 	}
 
 	// Blocks main until the scan has completed.
@@ -129,22 +135,24 @@ func nmapScan(ctx context.Context, scanPort string, scanTargets ...string) ([]Sc
 		if len(*warnings) > 0 {
 			log.Printf("run finished with warnings: %s\n", *warnings) // Warnings are non-critical errors from nmap.
 		}
-		log.Fatal(err)
+		return nil, fmt.Errorf("error finishing scan: %w", err)
 	}
-	var configs []ScrapeConfig
-	// Use the results to print an example output
+	configs := []ScrapeConfig{}
 	for _, host := range result.Hosts {
-		for _, port := range host.Ports {
+		if len(host.Hostnames) == 0 {
+			continue
+		}
+		for _, addr := range host.Addresses {
+			IP := addr.Addr
 			configs = append(configs, ScrapeConfig{
-				Targets: []string{net.JoinHostPort(host.Addresses[0].Addr, strconv.Itoa(int(port.ID)))},
+				Targets: []string{IP},
 				Labels: map[string]string{
-					"app":  "node-exporter",
-					"type": "external",
 					"host": host.Hostnames[0].Name,
 				},
 			})
 		}
+
 	}
-	log.Printf("Scan done, found %d hosts in %v", len(configs), time.Since(start))
+	log.Printf("Scan done, found %d hosts in %v (%d ignored)", len(configs), time.Since(start), ignored)
 	return configs, nil
 }
