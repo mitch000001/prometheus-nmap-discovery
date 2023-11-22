@@ -20,6 +20,9 @@ jobs:
   build:
     name: Build multi-platform Docker image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - name: Extract metadata (tags, labels) for Docker
