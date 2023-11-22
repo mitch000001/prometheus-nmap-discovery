@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	nmap "github.com/Ullaakut/nmap/v3"
@@ -101,8 +102,7 @@ func nmapScan(ctx context.Context, ignoredIPs map[string]struct{}, scanTargets .
 	log.Printf("Starting scan for targets %s", scanTargets)
 	start := time.Now()
 	var ignored int
-	s, err := nmap.NewScanner(
-		ctx,
+	options := []nmap.Option{
 		nmap.WithTargets(scanTargets...),
 		nmap.WithTimingTemplate(nmap.TimingFastest),
 		nmap.WithFilterHost(func(h nmap.Host) bool {
@@ -118,6 +118,14 @@ func nmapScan(ctx context.Context, ignoredIPs map[string]struct{}, scanTargets .
 		nmap.WithFilterPort(func(p nmap.Port) bool {
 			return p.Protocol == "tcp"
 		}),
+	}
+	if os.Getuid() == 0 {
+		log.Println("scanning with OS detection enabled")
+		options = append(options, nmap.WithOSDetection())
+	}
+	s, err := nmap.NewScanner(
+		ctx,
+		options...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create nmap scanner: %w", err)
@@ -142,15 +150,38 @@ func nmapScan(ctx context.Context, ignoredIPs map[string]struct{}, scanTargets .
 		if len(host.Hostnames) == 0 {
 			continue
 		}
+		var ipv4Addr string
+		var macAddr string
+		var macAddrVendor string
 		for _, addr := range host.Addresses {
-			IP := addr.Addr
-			configs = append(configs, ScrapeConfig{
-				Targets: []string{IP},
-				Labels: map[string]string{
-					"host": host.Hostnames[0].Name,
-				},
-			})
+			if addr.AddrType == "ipv4" {
+				ipv4Addr = addr.Addr
+			}
+			if addr.AddrType == "mac" {
+				macAddr = addr.Addr
+				macAddrVendor = addr.Vendor
+			}
 		}
+		if ipv4Addr == "" {
+			continue
+		}
+		labels := map[string]string{
+			"host": host.Hostnames[0].Name,
+		}
+		if macAddr != "" {
+			labels["mac_address"] = macAddr
+		}
+		if macAddrVendor != "" {
+			labels["mac_address_vendor"] = macAddrVendor
+		}
+		if len(host.OS.Matches) > 0 {
+			labels["guessed_os"] = host.OS.Matches[0].Name
+			labels["guessed_os_accuracy"] = strconv.Itoa(host.OS.Matches[0].Accuracy)
+		}
+		configs = append(configs, ScrapeConfig{
+			Targets: []string{ipv4Addr},
+			Labels:  labels,
+		})
 
 	}
 	log.Printf("Scan done, found %d hosts in %v (%d ignored)", len(configs), time.Since(start), ignored)
