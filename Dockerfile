@@ -1,4 +1,5 @@
 FROM golang:alpine3.18 as go-builder
+LABEL org.opencontainers.image.source="github.com/mitch000001/prometheus-nmap-discovery"
 WORKDIR /usr/src/prom-http-sd
 ADD . .
 RUN go build -v
