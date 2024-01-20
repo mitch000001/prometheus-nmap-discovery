@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-sd-nmap-webhook
+spec:
+  selector:
+    matchLabels:
+      app: prometheus-sd-nmap-webhook
+  template:
+    metadata:
+      labels:
+        app: prometheus-sd-nmap-webhook
+    spec:
+      containers:
+      - name: webhook
+        image: ghcr.io/mitch000001/prometheus-nmap-discovery:0.1.0
+        args:
+        - --scan.targets=192.168.0.0/23
+        - --scan.ignored-ips=192.168.0.1
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 8080
+          name: web

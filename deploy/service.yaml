@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-sd-nmap-webhook
+spec:
+  selector:
+    app: prometheus-sd-nmap-webhook
+  ports:
+  - name: web
+    port: 8080
+    targetPort: 80
